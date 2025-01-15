@@ -1,9 +1,10 @@
 (ns frontend.extensions.code
   (:require [clojure.string :as string]
-            ["codemirror" :as cm]
+            ["codemirror" :as CodeMirror]
             ["codemirror/addon/edit/closebrackets"]
             ["codemirror/addon/edit/matchbrackets"]
             ["codemirror/addon/selection/active-line"]
+            ["codemirror/addon/hint/show-hint"]
             ["codemirror/mode/apl/apl"]
             ["codemirror/mode/asciiarmor/asciiarmor"]
             ["codemirror/mode/asn.1/asn.1"]
@@ -126,66 +127,234 @@
             ["codemirror/mode/yaml-frontmatter/yaml-frontmatter"]
             ["codemirror/mode/yaml/yaml"]
             ["codemirror/mode/z80/z80"]
-            [dommy.core :as dom]
             [frontend.commands :as commands]
             [frontend.db :as db]
             [frontend.extensions.calc :as calc]
             [frontend.handler.editor :as editor-handler]
-            [frontend.handler.file :as file-handler]
+            [frontend.handler.code :as code-handler]
             [frontend.state :as state]
-            [frontend.utf8 :as utf8]
             [frontend.util :as util]
+            [frontend.config :as config]
             [goog.dom :as gdom]
             [goog.object :as gobj]
+            [frontend.schema.handler.common-config :refer [Config-edn]]
+            [malli.util :as mu]
+            [malli.core :as m]
             [rum.core :as rum]))
 
 ;; codemirror
 
-(def from-textarea (gobj/get cm "fromTextArea"))
+(def from-textarea (gobj/get CodeMirror "fromTextArea"))
+(def Pos (gobj/get CodeMirror "Pos"))
 
 (def textarea-ref-name "textarea")
 (def codemirror-ref-name "codemirror-instance")
 
+;; export CodeMirror to global scope
+(set! js/window -CodeMirror CodeMirror)
+
+
+(defn- all-tokens-by-cursur
+  "All tokens from the beginning of the document to the cursur(inclusive)."
+  [cm]
+  (let [cur (.getCursor cm)
+        line (.-line cur)
+        pos (.-ch cur)]
+    (concat (mapcat #(.getLineTokens cm %) (range line))
+            (filter #(<= (.-end %) pos) (.getLineTokens cm line)))))
+
+
+(defn- tokens->doc-state
+  "Parse tokens into document state of the last token."
+  [tokens]
+  (let [init-state {:current-config-path []
+                    :state-stack (list :ok)}]
+    (loop [state init-state
+           tokens tokens]
+      (if (empty? tokens)
+        state
+        (let [token (first tokens)
+              token-type (.-type token)
+              token-string (.-string token)
+              current-state (first (:state-stack state))
+              next-state (cond
+                           (or (nil? token-type)
+                               (= token-type "comment")
+                               (= token-type "meta") ;; TODO: handle meta prefix
+                               (= current-state :error))
+                           state
+
+                           (= token-type "bracket")
+                           (cond
+                             ;; ignore map if it is inside a list or vector (query or function)
+                             (and (= "{" token-string)
+                                  (some #(contains? #{:list :vector} %)
+                                        (:state-stack state)))
+                             (assoc state :state-stack (conj (:state-stack state) :ignore-map))
+                             (= "{" token-string)
+                             (assoc state :state-stack (conj (:state-stack state) :map))
+                             (= "(" token-string)
+                             (assoc state :state-stack (conj (:state-stack state) :list))
+                             (= "[" token-string)
+                             (assoc state :state-stack (conj (:state-stack state) :vector))
+
+                             (and (= :ignore-map current-state)
+                                  (contains? #{"}" ")" "]"} token-string))
+                             (assoc state :state-stack (pop (:state-stack state)))
+
+                             (or (and (= "}" token-string) (= :map current-state))
+                                 (and (= ")" token-string) (= :list current-state))
+                                 (and (= "]" token-string) (= :vector current-state)))
+                             (let [new-state-stack (pop (:state-stack state))]
+                               (if (= (first new-state-stack) :key)
+                                 (assoc state
+                                        :state-stack (pop new-state-stack)
+                                        :current-config-path (pop (:current-config-path state)))
+                                 (assoc state :state-stack (pop (:state-stack state)))))
+
+                             :else
+                             (assoc state :state-stack (conj (:state-stack state) :error)))
+
+                           (and (= current-state :map) (= token-type "atom"))
+                           (assoc state
+                                  :state-stack (conj (:state-stack state) :key)
+                                  :current-config-path (conj (:current-config-path state) token-string))
+
+                           (= current-state :key)
+                           (assoc state
+                                  :state-stack (pop (:state-stack state))
+                                  :current-config-path (pop (:current-config-path state)))
+
+                           (or (= current-state :list) (= current-state :vector) (= current-state :ignore-map))
+                           state
+
+                           :else
+                           (assoc state :state-stack (conj (:state-stack state) :error)))]
+          (recur next-state (rest tokens)))))))
+
+(defn- doc-state-at-cursor
+  "Parse tokens into document state of last token."
+  [cm]
+  (let [tokens (all-tokens-by-cursur cm)
+        {:keys [current-config-path state-stack]} (tokens->doc-state tokens)
+        doc-state (first state-stack)]
+    [current-config-path doc-state]))
+
+(defn- malli-type->completion-postfix
+  [type]
+  (case type
+    :string "\"\""
+    :map-of "{}"
+    :map "{}"
+    :set "#{}"
+    :vector "[]"
+    nil))
+
+(.registerHelper CodeMirror "hint" "clojure"
+                 (fn [cm _options]
+                   (let [cur (.getCursor cm)
+                         token (.getTokenAt cm cur)
+                         token-type (.-type token)
+                         token-string (.-string token)
+                         result (atom {})
+                         [config-path doc-state] (doc-state-at-cursor cm)]
+                     (cond
+
+                       ;; completion of config keys, triggered by `:` or shortcut
+                       (and (= token-type "atom")
+                            (string/starts-with? token-string ":")
+                            (= doc-state :key))
+                       (do
+                         (m/walk Config-edn
+                                 (fn [schema properties _children _opts]
+                                   (let [schema-path (mapv str properties)]
+                                     (cond
+                                       (empty? schema-path)
+                                       nil
+
+                                       (empty? config-path)
+                                       (swap! result assoc (first schema-path) (m/type schema))
+
+                                       (= (count config-path) 1)
+                                       (when (string/starts-with? (first schema-path) (first config-path))
+                                         (swap! result assoc (first schema-path) (m/type schema)))
+
+                                       (= (count config-path) 2)
+                                       (when (and (= (count schema-path) 2)
+                                                  (= (first schema-path) (first config-path))
+                                                  (string/starts-with? (second schema-path) (second config-path)))
+                                         (swap! result assoc (second schema-path) (m/type schema)))))
+                                   nil))
+                         (when (not-empty @result)
+                           (let [from (Pos. (.-line cur) (.-start token))
+                                 ;; `(.-ch cur)` is the cursor position, not the end of token. When completion is at the middle of a token, this is wrong
+                                 to (Pos. (.-line cur) (.-end token))
+                                 add-postfix-after? (<= (.-end token) (.-ch cur))
+                                 doc (.getValue cm)
+                                 list (->> (keys @result)
+                                           (remove (fn [text]
+                                                     (re-find (re-pattern (str "[^;]*" text "\\s")) doc)))
+                                           sort
+                                           (map (fn [text]
+                                                  (let [type (get @result text)]
+                                                    {:text (str text (when add-postfix-after?
+                                                                       (str " " (malli-type->completion-postfix type))))
+                                                     :displayText (str text "   " type)}))))
+
+                                 completion (clj->js {:list list
+                                                      :from from
+                                                      :to to})]
+                             completion)))
+
+                       ;; completion of :boolean, :enum, :keyword[TODO]
+                       (and (nil? token-type)
+                            (string/blank? (string/trim token-string))
+                            (not-empty config-path)
+                            (= doc-state :key))
+                       (do
+                         (m/walk Config-edn
+                                 (fn [schema properties _children _opts]
+                                   (let [schema-path (mapv str properties)]
+                                     (when (= config-path schema-path)
+                                       (case (m/type schema)
+                                         :boolean
+                                         (swap! result assoc
+                                                "true" nil
+                                                "false" nil)
+
+                                         :enum
+                                         (let [{:keys [children]} (mu/to-map-syntax schema)]
+                                           (doseq [child children]
+                                             (swap! result assoc (str child) nil)))
+
+                                         nil))
+                                     nil)))
+                         (when (not-empty @result)
+                           (let [from (Pos. (.-line cur) (.-ch cur))
+                                 to (Pos. (.-line cur) (.-ch cur))
+                                 list (->> (keys @result)
+                                           sort
+                                           (map (fn [text]
+                                                  {:text text
+                                                   :displayText text})))
+                                 completion (clj->js {:list list
+                                                      :from from
+                                                      :to to})]
+                             completion)))))))
+
+(defn- complete-after
+  [cm pred]
+  (when (or (not pred) (pred))
+    (js/setTimeout
+     (fn []
+       (when (not (.-completionActive (.-state cm)))
+         (.showHint cm #js {:completeSingle false})))
+     100))
+  (.-Pass CodeMirror))
+
 (defn- extra-codemirror-options []
   (get (state/get-config)
        :editor/extra-codemirror-options {}))
-
-(defn- save-file-or-block-when-blur-or-esc!
-  [editor textarea config state]
-  (.save editor)
-  (let [value (gobj/get textarea "value")
-        default-value (gobj/get textarea "defaultValue")]
-    (when (not= value default-value)
-      (cond
-        (:block/uuid config)
-        (let [block (db/pull [:block/uuid (:block/uuid config)])
-              content (:block/content block)
-              {:keys [start_pos end_pos]} (:pos_meta (last (:rum/args state)))
-              offset (if (:block/pre-block? block) 0 2)
-              raw-content (utf8/encode content) ;; NOTE: :pos_meta is based on byte position
-              prefix (utf8/decode (.slice raw-content 0 (- start_pos offset)))
-              surfix (utf8/decode (.slice raw-content (- end_pos offset)))
-              new-content (if (string/blank? value)
-                            (str prefix surfix)
-                            (str prefix value "\n" surfix))]
-          (editor-handler/save-block-if-changed! block new-content))
-
-        (:file-path config)
-        (let [path (:file-path config)
-              content (db/get-file path)
-              [_ id _ _ _] (:rum/args state)
-              value (some-> (gdom/getElement id)
-                            (gobj/get "value"))]
-          (when (and
-                 (not (string/blank? value))
-                 (not= (string/trim value) (string/trim content)))
-            (file-handler/alter-file (state/get-current-repo)
-                                     path
-                                     (str (string/trim value) "\n")
-                                     {:re-render-root? true})))
-
-        :else
-        nil))))
 
 (defn- text->cm-mode
   ([text]
@@ -198,7 +367,7 @@
                           :ext "findModeByExtension"
                           :file-name "findModeByFileName"
                           "findModeByName")
-           find-fn (gobj/get cm find-fn-name)
+           find-fn (gobj/get CodeMirror find-fn-name)
            cm-mode (find-fn mode)]
        (if cm-mode
          (.-mime cm-mode)
@@ -206,8 +375,7 @@
 
 (defn render!
   [state]
-  (let [esc-pressed? (atom nil)
-        [config id attr _code theme] (:rum/args state)
+  (let [[config id attr _code theme user-options] (:rum/args state)
         default-open? (and (:editor/code-mode? @state/state)
                            (= (:block/uuid (state/get-edit-block))
                               (get-in config [:block :block/uuid])))
@@ -217,8 +385,12 @@
                (text->cm-mode original-mode :ext) ;; ref: src/main/frontend/components/file.cljs
                (text->cm-mode original-mode :name))
         lisp-like? (contains? #{"scheme" "lisp" "clojure" "edn"} mode)
+        config-edit? (and (:file? config) (string/ends-with? (:file-path config) "config.edn"))
         textarea (gdom/getElement id)
-        default-cm-options {:theme (str "solarized " theme)
+        radix-color (state/sub :ui/radix-color)
+        default-cm-options {:theme (if radix-color 
+                                     (str "lsradix " theme)
+                                     (str "solarized " theme))
                             :autoCloseBrackets true
                             :lineNumbers true
                             :matchBrackets lisp-like?
@@ -226,67 +398,110 @@
         cm-options (merge default-cm-options
                           (extra-codemirror-options)
                           {:mode mode
-                           :extraKeys #js {"Esc"
-                                        (fn [cm]
-                                          (reset! esc-pressed? true)
-                                          (save-file-or-block-when-blur-or-esc! cm textarea config state)
-                                          (when-let [block-id (:block/uuid config)]
-                                            (let [block (db/pull [:block/uuid block-id])]
-                                              (editor-handler/edit-block! block :max block-id)))
-                                             ;; TODO: return "handled" or false doesn't always prevent event bubbles
-                                          (js/setTimeout #(reset! esc-pressed? false) 10))}})
+                           :tabIndex -1 ;; do not accept TAB-in, since TAB is bind globally
+                           :extraKeys (merge {"Esc" (fn [cm]
+                                                   ;; Avoid reentrancy
+                                                      (gobj/set cm "escPressed" true)
+                                                      (code-handler/save-code-editor!)
+                                                      (when-let [block-id (:block/uuid config)]
+                                                        (let [block (db/pull [:block/uuid block-id])]
+                                                          (editor-handler/edit-block! block :max block-id))))}
+                                             (when config-edit?
+                                               {"':'" complete-after
+                                                "Ctrl-Space" "autocomplete"}))}
+                          (when config/publishing?
+                            {:readOnly true
+                             :cursorBlinkRate -1})
+                          (when config-edit?
+                            {:hintOptions {}})
+                          user-options)
         editor (when textarea
                  (from-textarea textarea (clj->js cm-options)))]
     (when editor
-      (let [textarea-ref (rum/ref-node state textarea-ref-name)]
-        (gobj/set textarea-ref codemirror-ref-name editor))
-      (let [element (.getWrapperElement editor)]
+      (let [textarea-ref (rum/ref-node state textarea-ref-name)
+            element (.getWrapperElement editor)]
+        (gobj/set textarea-ref codemirror-ref-name editor)
         (when (= mode "calc")
           (.on editor "change" (fn [_cm _e]
                                  (let [new-code (.getValue editor)]
                                    (reset! (:calc-atom state) (calc/eval-lines new-code))))))
-        (.on editor "blur" (fn [_cm e]
+        (.on editor "blur" (fn [cm e]
                              (when e (util/stop e))
+                             (when (or
+                                    (= :file (state/get-current-route))
+                                    (not (gobj/get cm "escPressed")))
+                               (code-handler/save-code-editor!))
                              (state/set-block-component-editing-mode! false)
-                             (when-not @esc-pressed?
-                               (save-file-or-block-when-blur-or-esc! editor textarea config state))))
+                             (state/set-state! :editor/code-block-context nil)))
+        (.on editor "focus" (fn [_e]
+                              (state/set-block-component-editing-mode! true)
+                              (state/set-state! :editor/code-block-context
+                                                {:editor editor
+                                                 :config config
+                                                 :state state})))
+
+        (.addEventListener element "keydown" (fn [e]
+                                               (let [key-code (.-code e)
+                                                     meta-or-ctrl-pressed? (or (.-ctrlKey e) (.-metaKey e))]
+                                                 (when meta-or-ctrl-pressed?
+                                                   ;; prevent default behavior of browser
+                                                   ;; Cmd + [ => Go back in browser, outdent in CodeMirror
+                                                   ;; Cmd + ] => Go forward in browser, indent in CodeMirror
+                                                   (case key-code
+                                                     "BracketLeft" (util/stop e)
+                                                     "BracketRight" (util/stop e)
+                                                     nil)))))
         (.addEventListener element "mousedown"
                            (fn [e]
+                             (util/stop e)
                              (state/clear-selection!)
                              (when-let [block (and (:block/uuid config) (into {} (db/get-block-by-uuid (:block/uuid config))))]
-                               (state/set-editing! id (.getValue editor) block nil false))
-                             (util/stop e)
-                             (state/set-block-component-editing-mode! true)))
+                               (state/set-editing! id (.getValue editor) block nil false))))
+        (.addEventListener element "touchstart"
+                           (fn [e]
+                             (.stopPropagation e)))
         (.save editor)
-        (.refresh editor)))
-    (when default-open?
-      (.focus editor))
+        (.refresh editor)
+        (when default-open?
+          (.focus editor))))
     editor))
 
 (defn- load-and-render!
   [state]
-  (let [editor-atom (:editor-atom state)
-        editor (render! state)]
-    (reset! editor-atom editor)))
+  (let [editor-atom (:editor-atom state)]
+    (when-not @editor-atom
+      (let [editor (render! state)]
+        (reset! editor-atom editor)))))
+
+(defn get-theme! []
+  (if (state/sub :ui/radix-color)
+    (str "lsradix " (state/sub :ui/theme))
+    (str "solarized " (state/sub :ui/theme))))
 
 (rum/defcs editor < rum/reactive
   {:init (fn [state]
-           (let [[_ _ _ code _] (:rum/args state)]
-             (assoc state :editor-atom (atom nil) :calc-atom (atom (calc/eval-lines code)))))
+           (let [[_ _ _ code _ options] (:rum/args state)]
+             (assoc state
+                    :editor-atom (atom nil)
+                    :calc-atom (atom (calc/eval-lines code))
+                    :code-options (atom options)
+                    :last-theme (atom (get-theme!)))))
    :did-mount (fn [state]
                 (load-and-render! state)
                 state)
-   :will-update (fn [state]
-                  (when-let [editor @(:editor-atom state)]
-                    (.toTextArea ^js editor)
-                    (let [[_ _ _ code _] (:rum/args state)]
-                      (when-let [textarea (rum/ref-node state textarea-ref-name)]
-                        (gobj/set textarea "defaultValue" code)
-                        (gobj/set textarea "value" code))))
-                  state)
-
    :did-update (fn [state]
-                 (load-and-render! state)
+                 (let [next-theme (get-theme!)
+                       last-theme @(:last-theme state)
+                       editor (some-> state :editor-atom deref)]
+                   (when (and editor (not= next-theme last-theme)) 
+                     (reset! (:last-theme state) next-theme)
+                     (.setOption editor "theme" next-theme)))
+                 (reset! (:code-options state) (last (:rum/args state)))
+                 (when-not (:file? (first (:rum/args state)))
+                   (let [code (nth (:rum/args state) 3)
+                         editor @(:editor-atom state)]
+                     (when (and editor (not= (.getValue editor) code))
+                       (.setValue editor code))))
                  state)}
   [state _config id attr code _theme _options]
   [:div.extensions__code
@@ -294,7 +509,7 @@
      (when-not (= mode "calc")
        [:div.extensions__code-lang
         (string/lower-case mode)]))
-   [:div.flex.flex-1.flex-row.w-full.mt-6
+   [:div.code-editor.flex.flex-1.flex-row.w-full
     [:textarea (merge {:id id
                        ;; Expose the textarea associated with the CodeMirror instance via
                        ;; ref so that we can autofocus into the CodeMirror instance later.
@@ -313,13 +528,13 @@
   ;; you're trying to focus doesn't yet exist. Adding the requestAnimationFrame
   ;; ensures that the React component re-renders before the :codemirror/focus
   ;; command is run. It's not elegant... open to suggestions for how to fix it!
-  (js/window.requestAnimationFrame
-   (fn []
-     (let [block (state/get-edit-block)
-           block-uuid (:block/uuid block)
-           block-node (util/get-first-block-by-id block-uuid)]
-       (editor-handler/select-block! (:block/uuid block))
-       (let [textarea-ref (.querySelector block-node "textarea")]
-         (.focus (gobj/get textarea-ref codemirror-ref-name)))
-       (util/select-unhighlight! (dom/by-class "selected"))
-       (state/clear-selection!)))))
+  (let [block (state/get-edit-block)
+        block-uuid (:block/uuid block)]
+    (state/clear-edit!)
+    (js/setTimeout
+     (fn []
+       (let [block-node (util/get-first-block-by-id block-uuid)
+             textarea-ref (.querySelector block-node "textarea")]
+         (when-let [codemirror-ref (gobj/get textarea-ref codemirror-ref-name)]
+           (.focus codemirror-ref))))
+     100)))

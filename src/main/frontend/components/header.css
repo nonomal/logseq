@@ -1,24 +1,25 @@
 .cp__header {
   @apply shadow z-10;
   -webkit-app-region: drag;
-  
-  padding-top: var(--ls-headbar-inner-top-padding);
+
+  padding-top: calc(var(--ls-headbar-inner-top-padding));
+  margin-top: var(--ls-win32-title-bar-height);
   height: calc(var(--ls-headbar-height) + var(--ls-headbar-inner-top-padding));
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex: 0 0 auto;
   position: sticky;
-  position: -webkit-sticky;
   top: 0;
   left: 0;
   right: 0;
-  user-select: none;
   line-height: 1;
   white-space: nowrap;
 
   > .l {
-    width: var(--ls-left-sidebar-width);
+    @apply pl-2;
+
+    min-width: var(--ls-left-sidebar-width);
     height: 100%;
     align-items: center;
     transition: padding-left .2s;
@@ -26,33 +27,31 @@
 
   > .r {
     align-items: center;
-    padding-right: 0.5rem;
     flex: 1;
     justify-content: flex-end;
+    padding-right: 6px;
   }
 
   /* To prevent header glitch on Safari */
+
   > .l, > .r {
-      -webkit-transform: translate3d(0, 0, 0);
-      transform: translate3d(0, 0, 0);
+    -webkit-transform: translate3d(0, 0, 0);
+    transform: translate3d(0, 0, 0);
   }
 
-  .it svg {
-    transform: scale(0.8);
-  }
-
-  a.button {
-    margin: 0 4px;
-    height: 30px;
-    min-width: 30px;
+  .button {
     display: flex;
     align-items: center;
     justify-content: center;
-    opacity: .5;
 
-    .ti {
+    .ti, .tie {
       font-size: 20px;
     }
+  }
+
+  .ui-items-container .button {
+    width: auto;
+    padding: 0 8px;
   }
 
   svg.warning {
@@ -87,7 +86,6 @@
 
     a.restart {
       position: relative;
-      cursor: pointer !important;
       display: flex;
       align-items: center;
 
@@ -99,14 +97,25 @@
       > strong {
         display: inline-block;
         padding-left: 2px;
+        cursor: pointer;
       }
     }
   }
 
   .dropdown-wrapper {
-    .ti {
-      margin-right: 5px;
+    .ti, .tie {
       opacity: .9;
+    }
+  }
+
+  .add-graph-btn {
+    border: 1px dashed var(--ls-border-color);
+    padding: 0 8px;
+
+    strong {
+      padding: 0 10px;
+      position: relative;
+      top: 1px;
     }
   }
 }
@@ -117,15 +126,18 @@
   }
 }
 
-.cp__header .navigation svg {
-  transform: scale(0.7);
-}
-
 .is-electron.is-mac.is-fullscreen .cp__header > .l {
-  padding-left: 0;
+  padding-left: 1rem;
 }
 
-.cp__header a, .cp__header svg {
+/* Workaround for Linux Intel GPU text rendering issue GH#7233 */
+.is-electron.is-linux .cp__header .dropdown-wrapper .title-wrap {
+  position: relative;
+}
+
+.cp__header a,
+.cp__header svg,
+.cp__header button {
   -webkit-app-region: no-drag;
 }
 
@@ -161,35 +173,35 @@
 }
 
 #repo-name {
-  display: table-cell;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 15ch;
-  height: 14px;
+  @apply inline-flex items-center whitespace-nowrap;
+  max-width: 16ch;
 }
 
-a.button {
-  padding: 0.25rem;
-  opacity: 0.6;
-  display: block;
-  border-radius: 4px;
+.button {
+  @apply h-8 px-2.5 py-1 rounded-md opacity-90 block select-none hover:opacity-100 active:opacity-80;
 
-  &:hover, &.active {
-    opacity: 1;
-    background: none;
+  &:hover {
     @screen md {
-        background: var(--ls-tertiary-background-color);
+      background: var(--lx-gray-04, var(--ls-tertiary-background-color, var(--rx-gray-04)));
     }
   }
 }
 
-.is-mac.is-electron :is(.cp__header, .cp__right-sidebar-topbar) :is(button, .button, a) {
+.button.icon {
+  @apply w-8 h-8 p-1 flex items-center justify-center;
+}
+
+.button.icon.add-graph-btn {
+    width: unset;
+    margin: 0 6px;
+}
+
+.is-mac.is-electron :is(.cp__header, .cp__right-sidebar-topbar) :is(button, .button, a):not(.file-sync-item) {
   cursor: default !important;
 }
 
 html.is-ios.is-safari {
-    
+
   .cp__header {
     background-color: var(--ls-primary-background-color);
   }
@@ -203,111 +215,131 @@ html.is-native-iphone,
 html.is-native-iphone-without-notch,
 html.is-native-ipad {
 
-     #main-container {
-        padding-top: 0px;
+  #main-container {
+    padding-top: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #main-content-container {
+    padding-left: 22px;
+    padding-right: 14px;
+    padding-top: 0;
+    height: calc(100vh - var(--ls-headbar-inner-top-padding) - var(--ls-headbar-height));
+
+    @screen sm {
+      padding-left: 2rem;
     }
 
-    #main-content-container {
-        padding-top: 0px;
-        height: calc(100vh - var(--ls-headbar-inner-top-padding) - var(--ls-headbar-height));
+    .page {
+      margin-top: 15px;
     }
-    
-    .cp__header > .r {
-        display: flex;
+  }
+
+  .cp__header {
+    > .r {
+      display: flex;
     }
+
+    .button {
+      opacity: 1;
+    }
+  }
 }
 
 html.is-native-ipad {
-    --ls-headbar-inner-top-padding: 0px;
-    --ls-headbar-height: 4rem;
-    
-    .cp__header {
-      background-color: transparent !important;
-      display: flex;
-      
-      > .l {
-        /* background-color: var(--ls-primary-background-color); */
-        padding-top: 20px;
-      }
+  --ls-headbar-inner-top-padding: 0px;
+  --ls-headbar-height: 4rem;
 
-      > .r {
-        flex: 1;
-        background-color: var(--ls-primary-background-color);
-        height: 100%;
-        padding-top: 20px;
-        justify-content: flex-end;
-        align-items: center;
-      }
-    }
-    
-    .left-sidebar-inner  {
-        > .wrap {
-            padding-top: 20px;
-      }
+  .cp__header {
+    background-color: transparent !important;
+    display: flex;
+
+    > .l {
+      /* background-color: var(--ls-primary-background-color); */
+      padding-top: 20px;
     }
 
-    .cp__right-sidebar {
-        &-settings {
-            margin-top: -4px;
-        }
-
-        &-topbar {
-            padding-top: 37px;
-        }
-
-        &-inner {
-            .resizer {
-                top: 30vh;
-                width: 12px;
-                height: 40vh;
-            }
-            
-            .resizer:hover {
-                background-color: var(--ls-guideline-color, #ddd);
-            }
-        }
+    > .r {
+      flex: 1;
+      background-color: var(--ls-primary-background-color);
+      height: 100%;
+      padding-top: 20px;
+      justify-content: flex-end;
+      align-items: center;
     }
+  }
+
+  .left-sidebar-inner  {
+    > .wrap {
+      padding-top: 20px;
+    }
+  }
+
+  .cp__right-sidebar {
+    &-settings {
+      margin-top: -4px;
+    }
+
+    &-topbar {
+      padding-top: 37px;
+    }
+
+    &-inner {
+      .resizer {
+        top: 30vh;
+        width: 12px;
+        height: 40vh;
+      }
+
+      .resizer:hover {
+        background-color: var(--ls-guideline-color, #ddd);
+      }
+    }
+  }
 }
 
 html.is-native-iphone {
-    --ls-headbar-inner-top-padding: 36px;
+  --ls-headbar-inner-top-padding: 38px;
 
-    .left-sidebar-inner {
-        > .wrap {
-            padding-top: 12px;
-        }
+  .left-sidebar-inner {
+    .create {
+      padding-bottom: 32px;
+    }
+  }
 
-        .new-page {
-            padding-bottom: 12px;
-        }
-    }
-    
-    .ui__notifications {
-        top: calc(var(--ls-headbar-height) + var(--ls-headbar-inner-top-padding) - 0.3rem);
-    }
-    
-    @media (orientation: landscape) {
-        --ls-headbar-inner-top-padding: 8px;
-        --ls-headbar-height: 2.5rem;
+  .ui__notifications {
+    top: calc(var(--ls-headbar-height) + var(--ls-headbar-inner-top-padding) - 0.3rem);
+  }
 
-        .cp__header {
-            @apply shadow z-10;
-        }
-    }
+  @media (orientation: landscape) {
+    --ls-headbar-inner-top-padding: 8px;
+    --ls-headbar-height: 2.5rem;
+  }
 }
 
 html.is-native-iphone-without-notch {
-    
-    --ls-headbar-inner-top-padding: 15px;
+
+  --ls-headbar-inner-top-padding: 15px;
+  --ls-headbar-height: 2.5rem;
+
+  @media (orientation: landscape) {
+
+    --ls-headbar-inner-top-padding: 0px;
     --ls-headbar-height: 2.5rem;
+  }
+}
 
-    @media (orientation: landscape) {
+html.is-zoomed-native-ios {
+  --ls-headbar-inner-top-padding: 30px;
 
-        --ls-headbar-inner-top-padding: 0px;
-        --ls-headbar-height: 2.5rem;
-     
-        .cp__header {
-            @apply shadow z-10;
-        }
-    }
+  @media (orientation: landscape) {
+    --ls-headbar-inner-top-padding: 8px;
+    --ls-headbar-height: 2.5rem;
+  }
+}
+
+.drag-region {
+  user-select: none;
+  -webkit-app-region: drag;
 }

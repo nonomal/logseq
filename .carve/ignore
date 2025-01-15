@@ -4,7 +4,6 @@ electron.core/start
 electron.core/stop
 ;; repl fn
 electron.search/query
-frontend.blob/blob
 ;; Used by shadow-cljs
 frontend.core/stop
 ;; For repl
@@ -15,7 +14,16 @@ frontend.debug/print
 ;; Lazily loaded
 frontend.extensions.code/editor
 ;; Lazily loaded
+frontend.extensions.age-encryption/keygen
+frontend.extensions.age-encryption/encrypt-with-x25519
+frontend.extensions.age-encryption/decrypt-with-x25519
+frontend.extensions.age-encryption/encrypt-with-user-passphrase
+frontend.extensions.age-encryption/decrypt-with-user-passphrase
+;; Lazily loaded
 frontend.extensions.excalidraw/draw
+;; Lazily loaded
+frontend.extensions.tldraw/tldraw-app
+frontend.extensions.tldraw/generate-preview
 ;; Referenced in commented TODO
 frontend.extensions.pdf.utils/get-page-bounding
 ;; For repl
@@ -23,7 +31,7 @@ frontend.extensions.zotero.api/item
 ;; For repl
 frontend.external.roam/reset-state!
 ;; For repl
-frontend.format.mldoc/ast-export-markdown
+logseq.graph-parser.mldoc/ast-export-markdown
 ;; Protocol fn wrapper that could be used
 frontend.fs/readdir
 ;; Referenced in TODO
@@ -40,6 +48,7 @@ frontend.mixins/perf-measure-mixin
 frontend.mobile.util/get-idevice-statusbar-height
 ;; Used in macro
 frontend.modules.outliner.datascript/transact!
+frontend.modules.outliner.core/*transaction-opts*
 ;; Referenced in comment
 frontend.page/route-view
 ;; placeholder fn
@@ -58,11 +67,21 @@ frontend.ui/reset-ios-whole-page-offset!
 frontend.util/d
 ;; Future use?
 frontend.util/safe-search-normalize
+frontend.components.external/import-cp
+frontend.components.repo/add-repo
 ;; For debugging
 frontend.util/trace!
 ;; Repl fn
 frontend.util.pool/terminate-pool!
 ;; Repl fn
 frontend.util.property/add-page-properties
-;; Used by shadow
-frontend.worker.parser/init
+;; Test runners used by shadow
+frontend.test.node-test-runner/main
+frontend.test.frontend-node-test-runner/main
+;; Test runner for nbb
+logseq.graph-parser.nbb-test-runner/run-tests
+;; For debugging
+frontend.fs.sync/debug-print-sync-events-loop
+frontend.fs.sync/stop-debug-print-sync-events-loop
+;; Used in macro
+frontend.state/get-current-edit-block-and-position

@@ -10,7 +10,8 @@
             [frontend.ui :as ui]
             [frontend.util :as util]
             [frontend.mixins :as mixins]
-            [rum.core :as rum]))
+            [rum.core :as rum]
+            [logseq.graph-parser.util.page-ref :as page-ref]))
 
 (defonce default-timestamp-value {:time ""
                                   :repeater {}})
@@ -44,8 +45,8 @@
   [{:keys [num duration kind]}]
   (let [show? (rum/react *show-repeater?)]
     (if (or show? (and num duration kind))
-      [:div.w.full.flex.flex-row.justify-left {:style {:height 32}}
-       [:input#repeater-num.form-input.mt-1.w-8.px-1.sm:w-20.sm:px-2.text-center
+      [:div.w.full.flex.flex-row.justify-left
+       [:input#repeater-num.form-input.w-8.mr-2.px-1.sm:w-20.sm:px-2.text-center
         {:default-value num
          :on-change (fn [event]
                       (let [value (util/evalue event)]
@@ -61,11 +62,11 @@
           {:label "w"}
           {:label "m"}
           {:label "y"}])
-        (fn [value]
+        (fn [_e value]
           (swap! *timestamp assoc-in [:repeater :duration] value))
         nil)
 
-       [:a.ml-1.self-center {:on-click (fn []
+       [:a.ml-2.self-center {:on-click (fn []
                                          (reset! *show-repeater? false)
                                          (swap! *timestamp assoc :repeater {}))}
         svg/close]]
@@ -77,7 +78,7 @@
                                        :duration "d"}))}
        "Add repeater"])))
 
-(defn clear-timestamp!
+(defn- clear-timestamp!
   []
   (reset! *timestamp default-timestamp-value)
   (reset! *show-time? false)
@@ -85,6 +86,7 @@
   (state/set-state! :date-picker/date nil))
 
 (defn- on-submit
+  "Submit handler of date picker"
   [e]
   (when e (util/stop e))
   (let [{:keys [repeater] :as timestamp} @*timestamp
@@ -95,17 +97,22 @@
         text (repeated/timestamp-map->text timestamp)
         block-data (state/get-timestamp-block)
         {:keys [block typ show?]} block-data
-        block-id (or (:block/uuid (state/get-edit-block))
-                     (:block/uuid block))
+        editing-block-id (:block/uuid (state/get-edit-block))
+        block-id (or (:block/uuid block)
+                     editing-block-id)
         typ (or @commands/*current-command typ)]
-    (editor-handler/set-block-timestamp! block-id
-                                         typ
-                                         text)
+    (if (and (state/editing?) (= editing-block-id block-id))
+      (editor-handler/set-editing-block-timestamp! typ
+                                                   text)
+      (editor-handler/set-block-timestamp! block-id
+                                           typ
+                                           text))
+
     (when show?
       (reset! show? false)))
   (clear-timestamp!)
-  (state/set-editor-show-date-picker! false)
-  (commands/restore-state false))
+  (state/set-timestamp-block! nil)
+  (commands/restore-state))
 
 (rum/defc time-repeater < rum/reactive
   (mixins/event-mixin
@@ -116,7 +123,7 @@
                                         :on-enter on-submit) 100))))
   []
   (let [{:keys [time repeater]} (rum/react *timestamp)]
-    [:div#time-repeater.py-1.px-4 {:style {:min-width 300}}
+    [:div#time-repeater.py-1.px-4
      [:p.text-sm.opacity-50.font-medium.mt-4 "Time:"]
      (time-input time)
 
@@ -125,45 +132,43 @@
 
      [:p.mt-4
       (ui/button "Submit"
-        :on-click on-submit)]]))
+                 :on-click on-submit)]]))
 
 (rum/defc date-picker < rum/reactive
   {:init (fn [state]
            (let [ts (last (:rum/args state))]
+             (clear-timestamp!)
              (if ts
                (reset! *timestamp ts)
                (reset! *timestamp {:time ""
                                    :repeater {}}))
              (when-not (:date-picker/date @state/state)
-               (state/set-state! :date-picker/date (t/today))))
-           state)
-   :will-unmount (fn [state]
-                   (clear-timestamp!)
-                   state)}
-  [id format _ts]
+               (state/set-state! :date-picker/date (get ts :date (t/today)))))
+           state)}
+  [dom-id format _ts]
   (let [current-command @commands/*current-command
         deadline-or-schedule? (and current-command
                                    (contains? #{"deadline" "scheduled"}
                                               (string/lower-case current-command)))
         date (state/sub :date-picker/date)]
-    (when (state/sub :editor/show-date-picker?)
-      [:div#date-time-picker.flex.flex-row {:on-click (fn [e] (util/stop e))
-                                            :on-mouse-down (fn [e] (.stopPropagation e))}
-       (ui/datepicker
-        date
-        {:deadline-or-schedule? deadline-or-schedule?
-         :on-change
-         (fn [e date]
-           (util/stop e)
-           (let [date (t/to-default-time-zone date)
-                 journal (date/journal-name date)]
-             (when-not deadline-or-schedule?
+    [:div#date-time-picker.flex.flex-col.sm:flex-row {:on-click (fn [e] (util/stop e))
+                                                      :on-mouse-down (fn [e] (.stopPropagation e))}
+     (ui/datepicker
+      date
+      {:deadline-or-schedule? deadline-or-schedule?
+       :on-change
+       (fn [e date]
+         (util/stop e)
+         (let [date (t/to-default-time-zone date)
+               journal (date/journal-name date)]
+           ;; deadline-or-schedule? is handled in on-submit, not here
+           (when-not deadline-or-schedule?
                ;; similar to page reference
-               (editor-handler/insert-command! id
-                                               (util/format "[[%s]]" journal)
-                                               format
-                                               nil)
-               (state/set-editor-show-date-picker! false)
-               (reset! commands/*current-command nil))))})
-       (when deadline-or-schedule?
-         (time-repeater))])))
+             (editor-handler/insert-command! dom-id
+                                             (page-ref/->page-ref journal)
+                                             format
+                                             {:command :page-ref})
+             (state/clear-editor-action!)
+             (reset! commands/*current-command nil))))})
+     (when deadline-or-schedule?
+       (time-repeater))]))

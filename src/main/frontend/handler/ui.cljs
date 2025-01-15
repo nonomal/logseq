@@ -1,4 +1,4 @@
-(ns frontend.handler.ui
+(ns ^:no-doc frontend.handler.ui
   (:require [cljs-time.core :refer [plus days weeks]]
             [dommy.core :as dom]
             [frontend.util :as util]
@@ -13,10 +13,23 @@
             [goog.object :as gobj]
             [clojure.string :as string]
             [rum.core :as rum]
-            [frontend.mobile.util :as mobile]
-            [electron.ipc :as ipc]))
+            [electron.ipc :as ipc]
+            [promesa.core :as p]
+            [logseq.common.path :as path]))
 
 ;; sidebars
+(def *right-sidebar-resized-at (atom (js/Date.now)))
+
+(defn persist-right-sidebar-width!
+  [width]
+  (state/set-state! :ui/sidebar-width width)
+  (storage/set "ls-right-sidebar-width" width))
+
+(defn restore-right-sidebar-width!
+  []
+  (when-let [width (storage/get "ls-right-sidebar-width")]
+    (state/set-state! :ui/sidebar-width width)))
+
 (defn close-left-sidebar!
   []
   (when-let [elem (gdom/getElement "close-left-bar")]
@@ -24,6 +37,7 @@
 
 (defn toggle-right-sidebar!
   []
+  (when-not (:ui/sidebar-open? @state/state) (restore-right-sidebar-width!))
   (state/toggle-sidebar-open?!))
 
 (defn persist-right-sidebar-state!
@@ -41,7 +55,8 @@
       (when open?
         (state/set-state! :ui/sidebar-open? open?)
         (state/set-state! :sidebar/blocks blocks)
-        (state/set-state! :ui/sidebar-collapsed-blocks collapsed)))))
+        (state/set-state! :ui/sidebar-collapsed-blocks collapsed)
+        (restore-right-sidebar-width!)))))
 
 (defn toggle-contents!
   []
@@ -49,15 +64,11 @@
     (let [id "contents"]
       (if (state/sidebar-block-exists? id)
         (state/sidebar-remove-block! id)
-        (state/sidebar-add-block! current-repo id :contents nil)))))
+        (state/sidebar-add-block! current-repo id :contents)))))
 
 (defn toggle-help!
   []
-  (when-let [current-repo (state/get-current-repo)]
-    (let [id "help"]
-      (if (state/sidebar-block-exists? id)
-        (state/sidebar-remove-block! id)
-        (state/sidebar-add-block! current-repo id :help nil)))))
+  (state/toggle! :ui/help-open?))
 
 (defn toggle-settings-modal!
   []
@@ -72,19 +83,13 @@
    (re-render-root! {}))
   ([{:keys [clear-all-query-state?]
      :or {clear-all-query-state? false}}]
+   {:post [(nil? %)]}
    (when-let [component (state/get-root-component)]
      (if clear-all-query-state?
        (db/clear-query-state!)
        (db/clear-query-state-without-refs-and-embeds!))
-     (rum/request-render component)
-     (doseq [component (state/get-custom-query-components)]
-       (rum/request-render component)))))
-
-(defn re-render-file!
-  []
-  (when-let [component (state/get-file-component)]
-    (when (= :file (state/get-current-route))
-      (rum/request-render component))))
+     (rum/request-render component))
+   nil))
 
 (defn highlight-element!
   [fragment]
@@ -106,55 +111,58 @@
   []
   (when-let [style (or
                     (state/get-custom-css-link)
-                    (db-model/get-custom-css)
-                    ;; (state/get-custom-css-link)
-)]
+                    (some-> (db-model/get-custom-css)
+                            (config/expand-relative-assets-path)))]
     (util/add-style! style)))
+(defn reset-custom-css!
+  []
+  (when-let [el-style (gdom/getElement "logseq-custom-theme-id")]
+    (dom/remove! el-style))
+  (add-style-if-exists!))
 
 (def *js-execed (atom #{}))
 
 (defn exec-js-if-exists-&-allowed!
   [t]
-  (when-not (mobile/is-native-platform?)
-    (when-let [href (or
-                     (state/get-custom-js-link)
-                     (config/get-custom-js-path))]
-      (let [k (str "ls-js-allowed-" href)
-            execed #(swap! *js-execed conj href)
-            execed? (contains? @*js-execed href)
-            ask-allow #(let [r (js/confirm (t :plugin/custom-js-alert))]
-                         (if r
-                           (storage/set k (js/Date.now))
-                           (storage/set k false))
-                         r)
-            allowed! (storage/get k)
-            should-ask? (or (nil? allowed!)
-                            (> (- (js/Date.now) allowed!) 604800000))]
-        (when (and (not execed?)
-                   (not= false allowed!))
-          (if (string/starts-with? href "http")
-            (when (or (not should-ask?)
-                      (ask-allow))
-              (load href #(do (js/console.log "[custom js]" href) (execed))))
-            (util/p-handle
-             (fs/read-file (if (util/electron?) "" (config/get-repo-dir (state/get-current-repo))) href)
-             #(when-let [scripts (and % (string/trim %))]
-                (when-not (string/blank? scripts)
-                  (when (or (not should-ask?) (ask-allow))
-                    (try
-                      (js/eval scripts)
-                      (execed)
-                      (catch js/Error e
-                        (js/console.error "[custom js]" e)))))))))))))
+  (when-let [href (or
+                   (state/get-custom-js-link)
+                   (config/get-custom-js-path))]
+    (let [k (str "ls-js-allowed-" href)
+          execed #(swap! *js-execed conj href)
+          execed? (contains? @*js-execed href)
+          ask-allow #(let [r (js/confirm (t :plugin/custom-js-alert))]
+                       (if r
+                         (storage/set k (js/Date.now))
+                         (storage/set k false))
+                       r)
+          allowed! (storage/get k)
+          should-ask? (or (nil? allowed!)
+                          (> (- (js/Date.now) allowed!) 604800000))]
+      (when (and (not execed?)
+                 (not= false allowed!))
+        (if (string/starts-with? href "http")
+          (when (or (not should-ask?)
+                    (ask-allow))
+            (load href #(do (js/console.log "[custom js]" href) (execed))))
+          (let [repo-dir (config/get-repo-dir (state/get-current-repo))
+                rpath (path/relative-path repo-dir href)]
+            (p/let [exists? (fs/file-exists? repo-dir rpath)]
+              (when exists?
+                (util/p-handle
+                 (fs/read-file repo-dir rpath)
+                 #(when-let [scripts (and % (string/trim %))]
+                    (when-not (string/blank? scripts)
+                      (when (or (not should-ask?) (ask-allow))
+                        (try
+                          (js/eval scripts)
+                          (execed)
+                          (catch :default e
+                            (js/console.error "[custom js]" e)))))))))))))))
 
 (defn toggle-wide-mode!
   []
-  (let [wide? (state/get-wide-mode?)
-        elements (array-seq (js/document.getElementsByClassName "cp__sidebar-main-content"))
-        max-width (if wide? "var(--ls-main-content-max-width)" "var(--ls-main-content-max-width-wide)")]
-    (when-let [element (first elements)]
-      (dom/set-style! element :max-width max-width))
-    (state/toggle-wide-mode!)))
+  (storage/set :ui/wide-mode (not (state/get-wide-mode?)))
+  (state/toggle-wide-mode!))
 
 ;; auto-complete
 (defn auto-complete-prev
@@ -211,6 +219,17 @@
       ((or on-shift-chosen on-chosen) (nth matched @current-idx) false)
       (and on-enter (on-enter state)))))
 
+(defn auto-complete-open-link
+  [state e]
+  (let [[matched {:keys [on-chosen-open-link]}] (:rum/args state)]
+    (when (and on-chosen-open-link (not (state/editing?)))
+      (let [current-idx (get state :frontend.ui/current-idx)]
+        (util/stop e)
+        (when (and (seq matched)
+                   (> (count matched)
+                      @current-idx))
+          (on-chosen-open-link (nth matched @current-idx) false))))))
+
 ;; date-picker
 ;; TODO: find a better way
 (def *internal-model (rum/cursor state/state :date-picker/date))
@@ -266,10 +285,18 @@
 
 (defn toggle-cards!
   []
-  (if (:modal/show? @state/state)
+  (if (and (= :srs (:modal/id @state/state)) (:modal/show? @state/state))
     (state/close-modal!)
     (state/pub-event! [:modal/show-cards])))
 
 (defn open-new-window!
-  []
-  (ipc/ipc "openNewWindow"))
+  "Open a new Electron window.
+   No db cache persisting ensured. Should be handled by the caller."
+  ([]
+   (open-new-window! nil))
+  ([repo]
+   ;; TODO: find out a better way to open a new window with a different repo path. Using local storage for now
+   ;; TODO: also write local storage with the current repo state, to make behavior consistent
+   ;; then we can remove the `openNewWindowOfGraph` ipcMain call
+   (when (string? repo) (storage/set :git/current-repo repo))
+   (ipc/ipc "openNewWindow")))

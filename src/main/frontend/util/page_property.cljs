@@ -1,8 +1,9 @@
-(ns frontend.util.page-property
+(ns ^:no-doc frontend.util.page-property
   (:require [clojure.string :as string]
             [frontend.db :as db]
             [frontend.modules.outliner.core :as outliner-core]
             [frontend.modules.outliner.file :as outliner-file]
+            [frontend.modules.outliner.transaction :as outliner-tx]
             [frontend.state :as state]
             [frontend.util :as util]))
 
@@ -12,13 +13,16 @@
     (let [key (if (string? key) (keyword key) key)
           key-part (util/format (case format
                                   :org "#+%s: "
-                                  "%s:: ") (name key))
+                                  "%s:: ") (string/lower-case (name key)))
           new-property-line (str key-part value)
           lines (string/split-lines content)
           key-exists? (atom false)
           lines (doall
                  (map (fn [line]
-                        (if (and (string/starts-with? line key-part) (not @key-exists?)) ; only replace the first match
+                        (if (and (string/starts-with?
+                                  (string/lower-case line)
+                                  (string/lower-case key-part))
+                                 (not @key-exists?)) ; only replace the first match
                           (do
                             (reset! key-exists? true)
                             new-property-line)
@@ -77,9 +81,10 @@
                                       (str (name key) ":: " value))
                      :block/format format
                      :block/properties {key value}
-                     :block/pre-block? true}]
-          (outliner-core/insert-node (outliner-core/block block)
-                                     (outliner-core/block page)
-                                     false)
-          (db/transact! [(assoc page-id :block/properties {key value})])))
+                     :block/pre-block? true}
+              page-properties-tx [(assoc page-id :block/properties {key value})]]
+          (outliner-tx/transact!
+            {:outliner-op :insert-blocks
+             :additional-tx page-properties-tx}
+            (outliner-core/insert-blocks! block page {:sibling? false}))))
       (outliner-file/sync-to-file page-id))))

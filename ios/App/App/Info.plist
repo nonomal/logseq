@@ -29,6 +29,19 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>com.logseq.logseq</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>logseq</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
@@ -37,11 +50,8 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-	</dict>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>We will access your camera when you take a photo, and embed it in your note.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
@@ -52,6 +62,8 @@
 	<string></string>
 	<key>NSFileProviderPresenceUsageDescription</key>
 	<string></string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>We will access your microphone to record audio notes</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>We will access your album when you save a photo.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
@@ -68,6 +80,10 @@
 			<string>ANY</string>
 		</dict>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
@@ -93,5 +109,7 @@
 	<true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

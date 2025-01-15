@@ -1,301 +1,335 @@
 import { expect } from '@playwright/test'
 import fs from 'fs/promises'
 import path from 'path'
-import { test, graphDir } from './fixtures'
-import { randomString, createRandomPage, newBlock } from './utils'
+import { test } from './fixtures'
+import { randomString, createRandomPage, modKey } from './utils'
 
 
-test('render app', async ({ page }) => {
-  // NOTE: part of app startup tests is moved to `fixtures.ts`.
-  await page.waitForFunction('window.document.title != "Loading"')
-
-  expect(await page.title()).toMatch(/^Logseq.*?/)
-})
-
-test('toggle sidebar', async ({ page }) => {
-  let sidebar = page.locator('#left-sidebar')
-
-  // Left sidebar is toggled by `is-open` class
-  if (/is-open/.test(await sidebar.getAttribute('class'))) {
-    await page.click('#left-menu.button')
-    expect(await sidebar.getAttribute('class')).not.toMatch(/is-open/)
-  } else {
-    await page.click('#left-menu.button')
-    expect(await sidebar.getAttribute('class')).toMatch(/is-open/)
-    await page.click('#left-menu.button')
-    expect(await sidebar.getAttribute('class')).not.toMatch(/is-open/)
-  }
-
-  await page.click('#left-menu.button')
-
-  expect(await sidebar.getAttribute('class')).toMatch(/is-open/)
-  await page.waitForSelector('#left-sidebar .left-sidebar-inner', { state: 'visible' })
-  await page.waitForSelector('#left-sidebar a:has-text("New page")', { state: 'visible' })
-})
-
-test('search', async ({ page }) => {
-  await page.click('#search-button')
-  await page.waitForSelector('[placeholder="Search or create page"]')
-  await page.fill('[placeholder="Search or create page"]', 'welcome')
-
-  await page.waitForTimeout(500)
-  const results = await page.$$('#ui__ac-inner .block')
-  expect(results.length).toBeGreaterThanOrEqual(1)
-})
-
-test('create page and blocks', async ({ page }) => {
+test('create page and blocks, save to disk', async ({ page, block, graphDir }) => {
   const pageTitle = await createRandomPage(page)
 
   // do editing
-  await page.fill(':nth-match(textarea, 1)', 'this is my first bullet')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await page.keyboard.type('first bullet')
+  await block.enterNext()
 
-  // first block
-  expect(await page.$$('.block-content')).toHaveLength(1)
+  await block.waitForBlocks(2)
 
-  await page.fill(':nth-match(textarea, 1)', 'this is my second bullet')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await page.keyboard.type('second bullet')
+  await block.enterNext()
 
-  await page.fill(':nth-match(textarea, 1)', 'this is my third bullet')
-  await page.press(':nth-match(textarea, 1)', 'Tab')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await page.keyboard.type('third bullet')
+  expect(await block.indent()).toBe(true)
+  await block.enterNext()
 
-  await page.keyboard.type('continue editing test')
+  await page.keyboard.type('continue editing')
   await page.keyboard.press('Shift+Enter')
-  await page.keyboard.type('continue')
+  await page.keyboard.type('second line')
 
-  await page.keyboard.press('Enter')
-  await page.keyboard.press('Shift+Tab')
-  await page.keyboard.press('Shift+Tab')
+  await block.enterNext()
+  expect(await block.unindent()).toBe(true)
+  expect(await block.unindent()).toBe(false)
   await page.keyboard.type('test ok')
   await page.keyboard.press('Escape')
 
-  const blocks = await page.$$('.ls-block')
-  expect(blocks).toHaveLength(5)
+  await block.waitForBlocks(5)
 
-  // active edit
-  await page.click('.ls-block >> nth=-1')
-  await page.press('textarea >> nth=0', 'Enter')
-  await page.fill('textarea >> nth=0', 'test')
+  // active edit, and create next block
+  await block.clickNext()
+  await page.keyboard.type('test')
   for (let i = 0; i < 5; i++) {
-    await page.keyboard.press('Backspace')
+    await page.keyboard.press('Backspace', { delay: 100 })
   }
 
   await page.keyboard.press('Escape')
-  await page.waitForTimeout(500)
-  expect(await page.$$('.ls-block')).toHaveLength(5)
+  await block.waitForBlocks(5)
 
-  await page.waitForTimeout(1000)
-
+  await page.waitForTimeout(2000) // wait for saving to disk
   const contentOnDisk = await fs.readFile(
     path.join(graphDir, `pages/${pageTitle}.md`),
     'utf8'
   )
-
   expect(contentOnDisk.trim()).toEqual(`
-- this is my first bullet
-- this is my second bullet
-	- this is my third bullet
-	- continue editing test
-	  continue
+- first bullet
+- second bullet
+	- third bullet
+	- continue editing
+	  second line
 - test ok`.trim())
 })
 
-test('delete and backspace', async ({ page }) => {
+
+test('delete and backspace', async ({ page, block }) => {
   await createRandomPage(page)
 
-  await page.fill(':nth-match(textarea, 1)', 'test')
-
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('test')
+  await block.mustFill('test')
 
   // backspace
   await page.keyboard.press('Backspace')
   await page.keyboard.press('Backspace')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('te')
+  expect(await page.inputValue('textarea >> nth=0')).toBe('te')
 
   // refill
-  await page.fill(':nth-match(textarea, 1)', 'test')
-  await page.keyboard.press('ArrowLeft')
-  await page.keyboard.press('ArrowLeft')
+  await block.enterNext()
+  await block.mustType('test')
+  await page.keyboard.press('ArrowLeft', { delay: 50 })
+  await page.keyboard.press('ArrowLeft', { delay: 50 })
 
   // delete
-  await page.keyboard.press('Delete')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('tet')
-  await page.keyboard.press('Delete')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('te')
-  await page.keyboard.press('Delete')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('te')
+  await page.keyboard.press('Delete', { delay: 50 })
+  expect(await page.inputValue('textarea >> nth=0')).toBe('tet')
+  await page.keyboard.press('Delete', { delay: 50 })
+  expect(await page.inputValue('textarea >> nth=0')).toBe('te')
+  await page.keyboard.press('Delete', { delay: 50 })
+  expect(await page.inputValue('textarea >> nth=0')).toBe('te')
 
-  // TODO: test delete & backspace across blocks
 })
 
 
-test('selection', async ({ page }) => {
+test('block selection', async ({ page, block }) => {
   await createRandomPage(page)
 
-  await page.fill(':nth-match(textarea, 1)', 'line 1')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.fill(':nth-match(textarea, 1)', 'line 2')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.press(':nth-match(textarea, 1)', 'Tab')
-  await page.fill(':nth-match(textarea, 1)', 'line 3')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.fill(':nth-match(textarea, 1)', 'line 4')
-  await page.press(':nth-match(textarea, 1)', 'Tab')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.fill(':nth-match(textarea, 1)', 'line 5')
+  await block.mustFill('1')
+  await block.enterNext()
+  await block.mustFill('2')
+  expect(await block.indent()).toBe(true)
+  await block.enterNext()
+  await block.mustFill('3')
+  await block.enterNext()
+  await block.mustFill('4')
+  expect(await block.unindent()).toBe(true)
+  await block.enterNext()
+  await block.mustFill('5')
+  expect(await block.indent()).toBe(true)
+  await block.enterNext()
+  await block.mustFill('6')
+  await block.enterNext()
+  await block.mustFill('7')
+  expect(await block.unindent()).toBe(true)
+  await block.enterNext()
+  await block.mustFill('8')
+  expect(await block.indent()).toBe(true)
+  await block.enterNext()
+  await block.mustFill('9')
+  expect(await block.unindent()).toBe(true)
 
+  // shift+up/down
   await page.keyboard.down('Shift')
   await page.keyboard.press('ArrowUp')
+  await block.waitForSelectedBlocks(1)
+  let locator = page.locator('.ls-block >> nth=8')
+
   await page.keyboard.press('ArrowUp')
+  await block.waitForSelectedBlocks(2)
+
   await page.keyboard.press('ArrowUp')
+  await block.waitForSelectedBlocks(3)
+
+  await page.keyboard.press('ArrowDown')
+  await block.waitForSelectedBlocks(2)
   await page.keyboard.up('Shift')
 
-  await page.waitForTimeout(500)
-  await page.keyboard.press('Backspace')
+  // mod+click select or deselect
+  await page.keyboard.down(modKey)
+  await page.click('.ls-block >> nth=7')
+  await block.waitForSelectedBlocks(1)
 
-  expect(await page.$$('.ls-block')).toHaveLength(2)
+  await page.click('.block-main-container >> nth=6')
+  await block.waitForSelectedBlocks(2)
+
+  // mod+shift+click
+  await page.click('.ls-block >> nth=4')
+  await block.waitForSelectedBlocks(3)
+
+  await page.keyboard.down('Shift')
+  await page.click('.ls-block >> nth=1')
+  await block.waitForSelectedBlocks(6)
+
+  await page.keyboard.up('Shift')
+  await page.keyboard.up(modKey)
+  await page.keyboard.press('Escape')
+
+  // shift+click
+  await page.keyboard.down('Shift')
+  await page.click('.block-main-container >> nth=0')
+  await page.click('.block-main-container >> nth=3')
+  await block.waitForSelectedBlocks(4)
+  await page.click('.ls-block >> nth=8')
+  await block.waitForSelectedBlocks(9)
+  await page.click('.ls-block >> nth=5')
+  await block.waitForSelectedBlocks(6)
+  await page.keyboard.up('Shift')
 })
 
-test('template', async ({ page }) => {
-  const randomTemplate = randomString(10)
+test('template', async ({ page, block }) => {
+  const randomTemplate = randomString(6)
 
   await createRandomPage(page)
 
-  await page.fill(':nth-match(textarea, 1)', 'template')
-  await page.press(':nth-match(textarea, 1)', 'Shift+Enter')
-  await page.type(':nth-match(textarea, 1)', 'template:: ' + randomTemplate)
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await block.mustFill('template test\ntemplate:: ')
+  await page.keyboard.type(randomTemplate, { delay: 100 })
+  await page.keyboard.press('Enter')
+  await block.clickNext()
 
-  await page.press(':nth-match(textarea, 1)', 'Tab')
-  await page.fill(':nth-match(textarea, 1)', 'line1')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.fill(':nth-match(textarea, 1)', 'line2')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.press(':nth-match(textarea, 1)', 'Tab')
-  await page.fill(':nth-match(textarea, 1)', 'line3')
+  expect(await block.indent()).toBe(true)
 
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await block.mustFill('line1')
+  await block.enterNext()
+  await block.mustFill('line2')
+  await block.enterNext()
 
+  expect(await block.indent()).toBe(true)
+  await block.mustFill('line3')
+  await block.enterNext()
 
-  expect(await page.$$('.ls-block')).toHaveLength(5)
+  expect(await block.unindent()).toBe(true)
+  expect(await block.unindent()).toBe(true)
+  expect(await block.unindent()).toBe(false) // already at the first level
 
-  await page.type(':nth-match(textarea, 1)', '/template')
+  await block.waitForBlocks(5)
+
+  // See-also: #9354
+  await block.enterNext()
+  await block.mustType('/template')
 
   await page.click('[title="Insert a created template here"]')
   // type to search template name
-  await page.keyboard.type(randomTemplate.substring(0, 3))
-  await page.click('.absolute >> text=' + randomTemplate)
+  await page.keyboard.type(randomTemplate.substring(0, 3), { delay: 100 })
 
-  await page.waitForTimeout(500)
+  const popupMenuItem = page.locator('.absolute >> text=' + randomTemplate)
+  await popupMenuItem.waitFor({ timeout: 2000 }) // wait for template search
+  await popupMenuItem.click()
 
-  expect(await page.$$('.ls-block')).toHaveLength(8)
+  await block.waitForBlocks(9)
+
+
+  await block.clickNext()
+  await block.mustType('/template')
+
+  await page.click('[title="Insert a created template here"]')
+  // type to search template name
+  await page.keyboard.type(randomTemplate.substring(0, 3), { delay: 100 })
+
+  await popupMenuItem.waitFor({ timeout: 2000 }) // wait for template search
+  await popupMenuItem.click()
+
+  await block.waitForBlocks(13) // 9 + 4
 })
 
-test('auto completion square brackets', async ({ page }) => {
+test('auto completion square brackets', async ({ page, block }) => {
   await createRandomPage(page)
 
-  await page.fill(':nth-match(textarea, 1)', 'Auto-completion test')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  // In this test, `type` is unused instead of `fill`, to allow for auto-completion.
 
   // [[]]
-  await page.type(':nth-match(textarea, 1)', 'This is a [')
-  await page.inputValue(':nth-match(textarea, 1)').then(text => {
-    expect(text).toBe('This is a []')
-  })
-  await page.type(':nth-match(textarea, 1)', '[')
+  await block.mustType('This is a [', { toBe: 'This is a []' })
+  await block.mustType('[', { toBe: 'This is a [[]]' })
+
   // wait for search popup
   await page.waitForSelector('text="Search for a page"')
 
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('This is a [[]]')
-
   // re-enter edit mode
-  await page.press(':nth-match(textarea, 1)', 'Escape')
+  await page.press('textarea >> nth=0', 'Escape')
   await page.click('.ls-block >> nth=-1')
-  await page.waitForSelector(':nth-match(textarea, 1)', { state: 'visible' })
+  await page.waitForSelector('textarea >> nth=0', { state: 'visible' })
 
   // #3253
-  await page.press(':nth-match(textarea, 1)', 'ArrowLeft')
-  await page.press(':nth-match(textarea, 1)', 'ArrowLeft')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await page.press('textarea >> nth=0', 'ArrowLeft')
+  await page.press('textarea >> nth=0', 'ArrowLeft')
+  await page.press('textarea >> nth=0', 'Enter')
   await page.waitForSelector('text="Search for a page"', { state: 'visible' })
 
   // type more `]`s
-  await page.type(':nth-match(textarea, 1)', ']')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('This is a [[]]')
-  await page.type(':nth-match(textarea, 1)', ']')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('This is a [[]]')
-  await page.type(':nth-match(textarea, 1)', ']')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('This is a [[]]]')
+  await page.type('textarea >> nth=0', ']')
+  expect(await page.inputValue('textarea >> nth=0')).toBe('This is a [[]]')
+  await page.type('textarea >> nth=0', ']')
+  expect(await page.inputValue('textarea >> nth=0')).toBe('This is a [[]]')
+  await page.type('textarea >> nth=0', ']')
+  expect(await page.inputValue('textarea >> nth=0')).toBe('This is a [[]]]')
 })
 
-test('auto completion and auto pair', async ({ page }) => {
+test('auto completion and auto pair', async ({ page, block }) => {
   await createRandomPage(page)
 
-  await page.fill(':nth-match(textarea, 1)', 'Auto-completion test')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await block.mustFill('Auto-completion test')
+  await block.enterNext()
 
   // {{
-  await page.type(':nth-match(textarea, 1)', 'type {{')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type {{}}')
-
+  await block.mustType('type {{', { toBe: 'type {{}}' })
+  await page.waitForTimeout(100);
   // ((
-  await newBlock(page)
+  await block.clickNext()
 
-  await page.type(':nth-match(textarea, 1)', 'type (')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type ()')
-  await page.type(':nth-match(textarea, 1)', '(')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type (())')
+  await block.mustType('type (', { toBe: 'type ()' })
+  await block.mustType('(', { toBe: 'type (())' })
 
-  // 99  #3444
-  // TODO: Test under different keyboard layout when Playwright supports it
-  // await newBlock(page)
-
-  // await page.type(':nth-match(textarea, 1)', 'type 9')
-  // expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type 9')
-  // await page.type(':nth-match(textarea, 1)', '9')
-  // expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type 99')
+  await block.escapeEditing() // escape any popup from `(())`
 
   // [[  #3251
-  await newBlock(page)
+  await block.clickNext()
 
-  await page.type(':nth-match(textarea, 1)', 'type [')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type []')
-  await page.type(':nth-match(textarea, 1)', '[')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type [[]]')
+  await block.mustType('type [', { toBe: 'type []' })
+  await block.mustType('[', { toBe: 'type [[]]' })
+
+  await block.escapeEditing() // escape any popup from `[[]]`
 
   // ``
-  await newBlock(page)
+  await block.clickNext()
 
-  await page.type(':nth-match(textarea, 1)', 'type `')
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type ``')
-  await page.type(':nth-match(textarea, 1)', 'code here')
-
-  expect(await page.inputValue(':nth-match(textarea, 1)')).toBe('type `code here`')
+  await block.mustType('type `', { toBe: 'type ``' })
+  await block.mustType('code here', { toBe: 'type `code here`' })
 })
 
-
-// FIXME: Electron with filechooser is not working
-test.skip('open directory', async ({ page }) => {
-  await page.click('#left-sidebar >> text=Journals')
-  await page.waitForSelector('h1:has-text("Open a local directory")')
-  await page.click('h1:has-text("Open a local directory")')
-
-  // await page.waitForEvent('filechooser')
-  await page.keyboard.press('Escape')
-
-  await page.click('#left-sidebar >> text=Journals')
-})
-
-test('invalid page props #3944', async ({ page }) => {
+test('invalid page props #3944', async ({ page, block }) => {
   await createRandomPage(page)
 
-  await page.fill(':nth-match(textarea, 1)', 'public:: true\nsize:: 65535')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
-  await page.press(':nth-match(textarea, 1)', 'Enter')
+  await block.mustFill('public:: true\nsize:: 65535')
+  await page.press('textarea >> nth=0', 'Enter')
+  // Force rendering property block
+  await block.enterNext()
+})
 
-  await page.waitForTimeout(1000)
+test('Scheduled date picker should point to the already specified Date #6985', async ({ page, block }) => {
+  await createRandomPage(page)
+
+  await block.mustFill('testTask \n SCHEDULED: <2000-05-06 Sat>')
+  await block.enterNext()
+  await page.waitForTimeout(500)
+  await block.escapeEditing()
+
+  // Open date picker
+  await page.click('a.opacity-80')
+  await page.waitForTimeout(500)
+  await expect(page.locator('text=May 2000')).toBeVisible()
+  await expect(page.locator('td:has-text("6").active')).toBeVisible()
+
+  // Close date picker
+  await page.click('a.opacity-80')
+  await page.waitForTimeout(500)
+})
+
+test('Opening a second datepicker should close the first one #7341', async ({ page, block }) => {
+  await createRandomPage(page)
+
+  await block.mustFill('testTask \n SCHEDULED: <2000-05-06 Sat>')
+
+  await block.enterNext();
+
+  await block.mustFill('testTask \n SCHEDULED: <2000-06-07 Wed>')
+  await block.enterNext();
+  await page.click('#main-content-container')
+  // Open date picker
+  await page.waitForTimeout(500)
+  await page.click('#main-content-container')
+  await page.waitForTimeout(500)
+  await page.click('a:has-text("2000-06-07 Wed").opacity-80')
+  await page.waitForTimeout(50)
+  await page.click('a:has-text("2000-05-06 Sat").opacity-80')
+  await page.waitForTimeout(50)
+  await expect(page.locator('text=May 2000')).toBeVisible()
+  await expect(page.locator('td:has-text("6").active')).toBeVisible()
+  await expect(page.locator('text=June 2000')).not.toBeVisible()
+  await expect(page.locator('td:has-text("7").active')).not.toBeVisible()
+
+  // Close date picker
+  await page.click('a:has-text("2000-05-06 Sat").opacity-80')
 })

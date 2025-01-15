@@ -1,4 +1,5 @@
 (ns frontend.db.persist
+  "Handles operations to persisting db to disk or indexedDB"
   (:require [frontend.util :as util]
             [frontend.idb :as idb]
             [frontend.config :as config]
@@ -43,3 +44,14 @@
         (ipc/ipc "deleteGraph" key)
         (idb/remove-item! key))
      (idb/remove-item! key))))
+
+(defn rename-graph!
+  [old-repo new-repo]
+  (let [old-key (db-conn/datascript-db old-repo)
+        new-key (db-conn/datascript-db new-repo)]
+    (if (util/electron?)
+      (do
+        (js/console.error "rename-graph! is not supported in electron")
+        (idb/rename-item! old-key new-key))
+      (idb/rename-item! old-key new-key))))
+

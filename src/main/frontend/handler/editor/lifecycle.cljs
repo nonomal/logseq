@@ -1,9 +1,8 @@
-(ns frontend.handler.editor.lifecycle
+(ns ^:no-doc frontend.handler.editor.lifecycle
   (:require [frontend.handler.editor :as editor-handler :refer [get-state]]
             [frontend.handler.editor.keyboards :as keyboards-handler]
-            [frontend.state :as state]
+            [frontend.state :as state :refer [sub]]
             [frontend.util :as util]
-            [frontend.mobile.util :as mobile-util]
             [goog.dom :as gdom]))
 
 (defn did-mount!
@@ -19,14 +18,16 @@
     ;; which will hide the editor so no way for editing.
     (js/setTimeout #(keyboards-handler/esc-save! state) 100)
 
+    ;; try to close all opened dropdown menu
+    (when-let [close-fns (vals (sub :modal/dropdowns))]
+      (try (doseq [f close-fns] (f)) (catch :default _e ())))
+
     (when-let [element (gdom/getElement id)]
       (.focus element)
-      (when (or (mobile-util/is-native-platform?)
-                (util/mobile?))
-        (util/make-el-cursor-position-into-center-viewport element))))
+      (js/setTimeout #(util/scroll-editor-cursor element) 50)))
   state)
 
-(defn did-remount!
+(defn will-remount!
   [_old-state state]
   (keyboards-handler/esc-save! state)
   state)
@@ -35,12 +36,14 @@
   [state]
   (let [{:keys [value]} (get-state)]
     (editor-handler/clear-when-saved!)
-    ;; TODO: ugly
-    (when-not (contains? #{:insert :indent-outdent :auto-save :undo :redo :delete} (state/get-editor-op))
+    (when (and
+           (not (contains? #{:insert :indent-outdent :auto-save :undo :redo :delete} (state/get-editor-op)))
+           ;; Don't trigger auto-save if the latest op is undo or redo
+           (not (contains? #{:undo :redo :paste-blocks} (state/get-editor-latest-op))))
       (editor-handler/save-block! (get-state) value)))
   state)
 
 (def lifecycle
   {:did-mount did-mount!
-   :did-remount did-remount!
+   :will-remount will-remount!
    :will-unmount will-unmount})

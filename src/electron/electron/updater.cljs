@@ -1,5 +1,6 @@
 (ns electron.updater
-  (:require [electron.utils :refer [mac? prod? open fetch logger *win]]
+  (:require [electron.utils :refer [mac? win32? prod? open fetch *win]]
+            [electron.logger :as logger]
             [frontend.version :refer [version]]
             [clojure.string :as string]
             [promesa.core :as p]
@@ -8,12 +9,12 @@
             ["semver" :as semver]
             ["os" :as os]
             ["fs" :as fs]
-            ["path" :as path]
+            ["path" :as node-path]
             ["electron" :refer [ipcMain app autoUpdater]]))
 
 (def *update-ready-to-install (atom nil))
 (def *update-pending (atom nil))
-(def debug (partial (.-warn logger) "[updater]"))
+(def debug (partial logger/debug "[updater]"))
 
 ;Event: 'error'
 ;Event: 'checking-for-update'
@@ -30,8 +31,7 @@
 
 (defn get-latest-artifact-info
   [repo]
-  (let [;endpoint "https://update.electronjs.org/xyhp915/cljs-todo/darwin-x64/0.0.4"
-        endpoint (str "https://update.electronjs.org/" repo "/" js/process.platform "-" js/process.arch "/" electron-version)]
+  (let [endpoint (str "https://update.electronjs.org/" repo "/" js/process.platform "-" js/process.arch "/" electron-version)]
     (debug "checking" endpoint)
     (p/catch
      (p/let [res (fetch endpoint)
@@ -42,7 +42,7 @@
            (bean/->clj info))
          (throw (js/Error. (str "[" status "] " text)))))
      (fn [e]
-       (js/console.warn "[update server error] " e)
+       (logger/warn "[update server error]" e)
        (throw e)))))
 
 (defn check-for-updates
@@ -61,7 +61,7 @@
              artifact (when-let [remote-version (and artifact (re-find #"\d+\.\d+\.\d+" (:url artifact)))]
                         (when (and (. semver valid remote-version)
                                    (. semver lt electron-version remote-version)) artifact))
-             
+
              url (if-not artifact (do (emit "update-not-available" nil) (throw nil)) (:url artifact))
              _ (if url (emit "update-available" (bean/->js artifact)) (throw (js/Error. "download url not exists")))
                ;; start download FIXME: user's preference about auto download
@@ -75,8 +75,8 @@
                                 body (.-body dl-res)
                                 start-at (.now js/Date)
                                 *downloaded (atom 0)
-                                dest-basename (path/basename url)
-                                tmp-dest-file (path/join (os/tmpdir) (str dest-basename ".pending"))
+                                dest-basename (node-path/basename url)
+                                tmp-dest-file (node-path/join (os/tmpdir) (str dest-basename ".pending"))
                                 dest-file (.createWriteStream fs tmp-dest-file)]
                             (doto body
                               (.on "data" (fn [chunk]
@@ -112,7 +112,7 @@
 
 (defn- new-version-downloaded-cb
   [_ notes name date url]
-  (.info logger "[update-downloaded]" name notes date url)
+  (logger/info "[update-downloaded]" name notes date url)
   (when-let [web-contents (and @*win (. ^js @*win -webContents))]
     (.send web-contents "auto-updater-downloaded"
            (bean/->js {:notes notes :name name :date date :url url}))))
@@ -128,7 +128,9 @@
            ;; start auto updater
           (do
             (debug "Found remote version" remote-version)
-            (when mac?
+            (when (or mac? win32?)
+              (debug "forward update to autoUpdater")
+              ;; FIXME: It seems that update-electron-app doesn't work on linux
               (when-let [f (js/require "update-electron-app")]
                 (f #js{:notifyUser false})
                 (.once autoUpdater "update-downloaded"
@@ -137,7 +139,7 @@
           (debug "Skip remote version [ahead of pre-release]" remote-version))))))
 
 (defn init-updater
-  [{:keys [repo _logger ^js _win] :as opts}]
+  [{:keys [repo ^js _win] :as opts}]
   (and prod? (not= false (cfgs/get-item :auto-update)) (init-auto-updater repo))
   (let [check-channel "check-for-updates"
         install-channel "install-updates"

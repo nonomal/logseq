@@ -1,14 +1,16 @@
 (ns frontend.modules.file.core
-  (:require [cljs.core.async :as async]
-            [clojure.string :as string]
+  (:require [clojure.string :as string]
             [frontend.config :as config]
             [frontend.date :as date]
             [frontend.db :as db]
+            [frontend.db.model :as model]
             [frontend.db.utils :as db-utils]
+            [frontend.handler.file :as file-handler]
+            [frontend.modules.file.uprint :as up]
             [frontend.state :as state]
-            [frontend.util :as util]
-            [frontend.debug :as debug]
-            [frontend.util.property :as property]))
+            [frontend.util.fs :as fs-util]
+            [frontend.util.property :as property]
+            [logseq.common.path :as path]))
 
 (defn- indented-block-content
   [content spaces-tabs]
@@ -17,33 +19,40 @@
 
 (defn- content-with-collapsed-state
   "Only accept nake content (without any indentation)"
-  [format content collapsed? properties]
+  [format content collapsed?]
   (cond
     collapsed?
     (property/insert-property format content :collapsed true)
 
-    (and (:collapsed properties) (false? collapsed?))
+    ;; Don't check properties. Collapsed is an internal state log as property in file, but not counted into properties
+    (false? collapsed?)
     (property/remove-property format :collapsed content)
 
     :else
     content))
 
 (defn transform-content
-  [{:block/keys [collapsed? format pre-block? unordered content heading-level left page parent properties]} level {:keys [heading-to-list?]}]
-  (let [content (or content "")
-        first-block? (= left page)
-        pre-block? (and first-block? pre-block?)
-        markdown? (= format :markdown)
+  [{:block/keys [collapsed? format pre-block? content left page parent properties] :as b} level {:keys [heading-to-list?]}]
+  (let [block-ref-not-saved? (and (seq (:block/_refs (db/entity (:db/id b))))
+                                  (not (string/includes? content (str (:block/uuid b)))))
+        heading (:heading properties)
+        markdown? (= :markdown format)
+        content (or content "")
+        pre-block? (or pre-block?
+                       (and (= page parent left) ; first block
+                            markdown?
+                            (string/includes? (first (string/split-lines content)) ":: ")))
         content (cond
                   pre-block?
                   (let [content (string/trim content)]
                     (str content "\n"))
 
                   :else
-                  (let [markdown-top-heading? (and markdown?
-                                                   (= parent page)
-                                                   (not unordered)
-                                                   heading-level)
+                  (let [
+                        ;; first block is a heading, Markdown users prefer to remove the `-` before the content
+                        markdown-top-heading? (and markdown?
+                                                   (= parent page left)
+                                                   heading)
                         [prefix spaces-tabs]
                         (cond
                           (= format :org)
@@ -55,10 +64,10 @@
                           ["" ""]
 
                           :else
-                          (let [level (if (and heading-to-list? heading-level)
-                                        (if (> heading-level 1)
-                                          (dec heading-level)
-                                          heading-level)
+                          (let [level (if (and heading-to-list? heading)
+                                        (if (> heading 1)
+                                          (dec heading)
+                                          heading)
                                         level)
                                 spaces-tabs (->>
                                              (repeat (dec level) (state/get-export-bullet-indentation))
@@ -68,13 +77,16 @@
                                   (-> (string/replace content #"^\s?#+\s+" "")
                                       (string/replace #"^\s?#+\s?$" ""))
                                   content)
-                        content (content-with-collapsed-state format content collapsed? properties)
+                        content (content-with-collapsed-state format content collapsed?)
                         new-content (indented-block-content (string/trim content) spaces-tabs)
                         sep (if (or markdown-top-heading?
                                     (string/blank? new-content))
                               ""
                               " ")]
-                    (str prefix sep new-content)))]
+                    (str prefix sep new-content)))
+        content (if block-ref-not-saved?
+                  (property/insert-property format content :id (str (:block/uuid b)))
+                  content)]
     content))
 
 
@@ -100,59 +112,63 @@
 
 (def init-level 1)
 
-(defn push-to-write-chan
-  [files & opts]
-  (let [repo (state/get-current-repo)
-        chan (state/get-file-write-chan)]
-    (assert (some? chan) "File write chan shouldn't be nil")
-    (let [chan-callback (:chan-callback opts)]
-      (async/put! chan [repo files opts])
-      (doseq [file (map first files)]
-        (debug/set-ack-step! file :pushed-to-channel))
-      (when chan-callback
-        (chan-callback)))))
-
 (defn- transact-file-tx-if-not-exists!
-  [page ok-handler]
-  (when-let [repo (state/get-current-repo)]
-    (when (:block/name page)
-      (let [format (name (get page :block/format
-                              (state/get-preferred-format)))
-            title (string/capitalize (:block/name page))
-            journal-page? (date/valid-journal-title? title)
-            path (str
-                  (if journal-page?
-                    (config/get-journals-directory)
-                    (config/get-pages-directory))
-                  "/"
-                  (if journal-page?
-                    (date/journal-title->default title)
-                    (-> (or (:block/original-name page) (:block/name page))
-                        (util/page-name-sanity true))) "."
-                  (if (= format "markdown") "md" format))
-            file-path (config/get-file-path repo path)
-            file {:file/path file-path}
-            tx [{:file/path file-path}
-                {:block/name (:block/name page)
-                 :block/file file}]]
-        (db/transact! tx)
-        (when ok-handler (ok-handler))))))
+  [page-block ok-handler]
+  (when (and (state/get-current-repo)
+             (:block/name page-block))
+    (let [format (name (get page-block :block/format
+                            (state/get-preferred-format)))
+          title (string/capitalize (:block/name page-block))
+          whiteboard-page? (model/whiteboard-page? page-block)
+          format (if whiteboard-page? "edn" format)
+          journal-page? (date/valid-journal-title? title)
+          journal-title (date/normalize-journal-title title)
+          journal-page? (and journal-page? (not (string/blank? journal-title)))
+          filename (if journal-page?
+                     (date/date->file-name journal-title)
+                     (-> (or (:block/original-name page-block) (:block/name page-block))
+                         (fs-util/file-name-sanity)))
+          sub-dir (cond
+                    journal-page?    (config/get-journals-directory)
+                    whiteboard-page? (config/get-whiteboards-directory)
+                    :else            (config/get-pages-directory))
+          ext (if (= format "markdown") "md" format)
+          file-rpath (path/path-join sub-dir (str filename "." ext))
+          file {:file/path file-rpath}
+          tx [{:file/path file-rpath}
+              {:block/name (:block/name page-block)
+               :block/file file}]]
+      (db/transact! tx)
+      (when ok-handler (ok-handler)))))
+
+(defn- remove-transit-ids [block] (dissoc block :db/id :block/file))
 
 (defn save-tree-aux!
-  [page-block tree]
+  [page-block tree blocks-just-deleted?]
   (let [page-block (db/pull (:db/id page-block))
-        new-content (tree->file-content tree {:init-level init-level})
         file-db-id (-> page-block :block/file :db/id)
-        file-path (-> (db-utils/entity file-db-id) :file/path)
-        _ (assert (string? file-path) "File path should satisfy string?")
-        ;; FIXME: name conflicts between multiple graphs
-        files [[file-path new-content]]]
-    (push-to-write-chan files)))
+        file-path (-> (db-utils/entity file-db-id) :file/path)]
+    (if (and (string? file-path) (not-empty file-path))
+      (let [new-content (if (= "whiteboard" (:block/type page-block))
+                          (->
+                           (up/ugly-pr-str {:blocks tree
+                                            :pages (list (remove-transit-ids page-block))})
+                           (string/triml))
+                          (tree->file-content tree {:init-level init-level}))]
+        (if (and (string/blank? new-content)
+                 (not blocks-just-deleted?))
+          (state/pub-event! [:capture-error {:error (js/Error. "Empty content")
+                                             :payload {}}])
+          (let [files [[file-path new-content]]
+                repo (state/get-current-repo)]
+            (file-handler/alter-files-handler! repo files {} {}))))
+      ;; In e2e tests, "card" page in db has no :file/path
+      (js/console.error "File path from page-block is not valid" page-block tree))))
 
-(defn save-tree
-  [page-block tree]
+(defn save-tree!
+  [page-block tree blocks-just-deleted?]
   {:pre [(map? page-block)]}
-  (let [ok-handler #(save-tree-aux! page-block tree)
+  (let [ok-handler #(save-tree-aux! page-block tree blocks-just-deleted?)
         file (or (:block/file page-block)
                  (when-let [page (:db/id (:block/page page-block))]
                    (:block/file (db-utils/entity page))))]

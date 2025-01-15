@@ -1,20 +1,23 @@
 (ns frontend.mobile.util
-  (:require ["@capacitor/core" :refer [Capacitor registerPlugin]]
+  (:require ["@capacitor/core" :refer [Capacitor registerPlugin ^js Plugins]]
             ["@capacitor/splash-screen" :refer [SplashScreen]]
-            [clojure.string :as string]))
+            ["@logseq/capacitor-file-sync" :refer [FileSync]]
+            [clojure.string :as string]
+            [promesa.core :as p]
+            [goog.object :as gobj]))
 
 (defn platform []
   (.getPlatform Capacitor))
 
-(defn is-native-platform? []
+(defn native-platform? []
   (.isNativePlatform Capacitor))
 
 (defn native-ios? []
-  (and (is-native-platform?)
+  (and (native-platform?)
        (= (platform) "ios")))
 
 (defn native-android? []
-  (and (is-native-platform?)
+  (and (native-platform?)
        (= (platform) "android")))
 
 (defn convert-file-src [path-str]
@@ -22,60 +25,16 @@
 
 (defonce folder-picker (registerPlugin "FolderPicker"))
 (when (native-ios?)
- (defonce download-icloud-files (registerPlugin "DownloadiCloudFiles")))
-(when (native-ios?)
+  (defonce ios-utils (registerPlugin "Utils"))
   (defonce ios-file-container (registerPlugin "FileContainer")))
 
-(defn sync-icloud-repo [repo-dir]
-  (let [repo-name (-> (string/split repo-dir "Documents/")
-                      last
-                      string/trim
-                      js/decodeURI)]
-    (.syncGraph download-icloud-files
-                       (clj->js {:graph repo-name}))))
+;; NOTE: both iOS and android share the same API
+(when (native-platform?)
+  (defonce file-sync FileSync)
+  (defonce fs-watcher (registerPlugin "FsWatcher")))
 
 (defn hide-splash []
   (.hide SplashScreen))
-
-(def idevice-info
-  (atom
-   {:iPadPro12.9    {:width 1024 :height 1366 :statusbar 40}
-    :iPadPro11      {:width 834  :height 1194 :statusbar 40}
-    :iPadPro10.5    {:width 834  :height 1112 :statusbar 40}
-    :iPadAir10.5    {:width 834  :height 1112 :statusbar 40}
-    :iPadAir10.9    {:width 820  :height 1180 :statusbar 40}
-    :iPad10.2       {:width 810  :height 1080 :statusbar 40}
-    :iPadPro9.7     {:width 768  :height 1024 :statusbar 40}
-    :iPadmini9.7    {:width 768  :height 1024 :statusbar 40}
-    :iPadAir9.7     {:width 768  :height 1024 :statusbar 40}
-    :iPad9.7        {:width 768  :height 1024 :statusbar 40}
-    :iPadmini8.3        {:width 744  :height 1133 :statusbar 40}
-    :iPhone7Plus        {:width 476  :height 847  :statusbar 20}
-    :iPhone6sPlus   {:width 476  :height 847  :statusbar 20}
-    :iPhone6Plus        {:width 476  :height 847  :statusbar 20}
-    :iPhone13ProMax {:width 428  :height 926  :statusbar 47}
-    :iPhone12ProMax {:width 428  :height 926  :statusbar 47}
-    :iPhone11ProMax {:width 414  :height 896  :statusbar 44}
-    :iPhone11       {:width 414  :height 896  :statusbar 48}
-    :iPhoneXSMax        {:width 414  :height 896  :statusbar 48}
-    :iPhoneXR       {:width 414  :height 896  :statusbar 48}
-    :iPhone8Plus        {:width 414  :height 736  :statusbar 20}
-    :iPhone13Pro        {:width 390  :height 844  :statusbar 47}
-    :iPhone13       {:width 390  :height 844  :statusbar 47}
-    :iPhone12       {:width 390  :height 844  :statusbar 47}
-    :iPhone12Pro        {:width 390  :height 844  :statusbar 47}
-    :iPhone11Pro        {:width 375  :height 812  :statusbar 44}
-    :iPhoneXS       {:width 375  :height 812  :statusbar 44}
-    :iPhoneX        {:width 375  :height 812  :statusbar 44}
-    :iPhone8        {:width 375  :height 667  :statusbar 20}
-    :iPhone7        {:width 375  :height 667  :statusbar 20}
-    :iPhone6s       {:width 375  :height 667  :statusbar 20}
-    :iPhone6        {:width 375  :height 667  :statusbar 20}
-    :iPhone13mini   {:width 375  :height 812  :statusbar 44}
-    :iPhone12mini   {:width 375  :height 812  :statusbar 44}
-    :iPhoneSE4      {:width 320  :height 568  :statusbar 20}
-    :iPodtouch5     {:width 320  :height 568  :statusbar 20}}))
-
 
 (defn get-idevice-model
   []
@@ -85,6 +44,9 @@
           landscape? (> width height)
           [width height] (if landscape? [height width] [width height])]
       [(case [width height]
+         ;; The following list is from:
+         ;; - https://useyourloaf.com/blog/ipad-2024-screen-sizes/
+         ;; - https://useyourloaf.com/blog/iphone-15-screen-sizes/
          [320 568] "iPhoneSE4"
          [375 667] "iPhone8"
          [375 812] "iPhoneX"
@@ -93,6 +55,8 @@
          [414 896] "iPhone11"
          [428 926] "iPhone13ProMax"
          [476 847] "iPhone7Plus"
+         [393 852] "iPhone14Pro"
+         [430 932] "iPhone14ProMax"
          [744 1133] "iPadmini8.3"
          [768 1024] "iPad9.7"
          [810 1080] "iPad10.2"
@@ -100,6 +64,8 @@
          [834 1112] "iPadAir10.5"
          [834 1194] "iPadPro11"
          [1024 1366] "iPadPro12.9"
+         [1032 1376] "iPadPro13(M4)"
+         [834 1210]  "iPadPro11(M4)"
          "Not a known Apple device!")
        landscape?])))
 
@@ -119,18 +85,28 @@
   (when-let [model (get-idevice-model)]
     (string/starts-with? (first model) "iPad")))
 
-(defn get-idevice-statusbar-height
+(defn check-ios-zoomed-display
+  "Detect whether iOS device is in Zoom Display"
   []
-  (let [[model landscape?] (get-idevice-model)
-        model (when-not (= model "Not a known Apple device!")
-                (keyword model))]
-    (if (and model landscape?)
-      20
-      (:statusbar (model @idevice-info)))))
+  (p/let [is-zoomed? (p/chain (.isZoomed ios-utils)
+                              #(js->clj % :keywordize-keys true))]
+    (when (:isZoomed is-zoomed?)
+      (let [^js cl (.-classList js/document.documentElement)]
+        (.add cl "is-zoomed-native-ios")))))
 
-(defn icloud-sync!
+(defn in-iCloud-container-path?
+  "Check whether `path' is logseq's iCloud container path on iOS"
+  [path]
+  (string/includes? path "/iCloud~com~logseq~logseq/"))
+
+(defn is-iCloud-container-path?
+  "Check whether `path' is iCloud container path on iOS"
+  [path]
+  (re-matches #"/iCloud~com~logseq~logseq/Documents/?$" path))
+
+(defn app-active?
+  "Whether the app is active. This function returns a promise."
   []
-  (let [f (fn []
-            (.downloadFilesFromiCloud download-icloud-files))]
-    (f)
-    (js/setInterval f 300000)))
+  (let [app ^js (gobj/get Plugins "App")]
+    (p/let [state (.getState app)]
+      (gobj/get state "isActive"))))

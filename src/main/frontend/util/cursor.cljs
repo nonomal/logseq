@@ -1,4 +1,4 @@
-(ns frontend.util.cursor
+(ns ^:no-doc frontend.util.cursor
   (:require [cljs-bean.core :as bean]
             [clojure.string :as string]
             [frontend.util :as util]
@@ -28,23 +28,23 @@
   where offset position is needed.
 
   If you only need character position, use `pos` instead. Do NOT call this."
-  [input]
-  (when input
-    (let [pos (util/get-selection-start input)
-          rect (bean/->clj (.. input (getBoundingClientRect) (toJSON)))]
-      (try
-        (some-> (gdom/getElement "mock-text")
-                gdom/getChildren
-                array-seq
-                (util/nth-safe pos)
-                mock-char-pos
-                (assoc :rect rect))
-        (catch :default _e
-          (js/console.log "index error" _e)
-          {:pos pos
-           :rect rect
-           :left js/Number.MAX_SAFE_INTEGER
-           :top js/Number.MAX_SAFE_INTEGER})))))
+  ([input] (get-caret-pos input (util/get-selection-start input)))
+  ([input pos]
+   (when input
+     (let [rect (bean/->clj (.. input (getBoundingClientRect) (toJSON)))]
+       (try
+         (some-> (gdom/getElement "mock-text")
+                 gdom/getChildren
+                 array-seq
+                 (util/nth-safe pos)
+                 mock-char-pos
+                 (assoc :rect rect))
+         (catch :default e
+           (js/console.log "index error" e)
+           {:pos pos
+            :rect rect
+            :left js/Number.MAX_SAFE_INTEGER
+            :top js/Number.MAX_SAFE_INTEGER}))))))
 
 
 (defn pos [input]
@@ -71,7 +71,7 @@
   ([input n]
    (when input
      (let [{:keys [pos]} (get-caret-pos input)
-           pos (if (and (= n 1) (not (zero? pos)))
+           pos (if (= n 1)
                  (or (util/safe-inc-current-pos-from-start (.-value input) pos)
                      (inc pos))
                  (+ pos n))]
@@ -111,17 +111,18 @@
 (defn beginning-of-line?
   [input]
   (let [[content pos] (get-input-content&pos input)]
-    (or (zero? pos)
-        (when-let [pre-char (subs content (dec pos) pos)]
-          (= pre-char \newline)))))
+    (when content
+      (or (zero? pos)
+         (when-let [pre-char (subs content (dec pos) pos)]
+           (= pre-char \newline))))))
 
 (defn move-cursor-to-line-end
   [input]
   (move-cursor-to input (line-end-pos input)))
 
-(defn move-cursor-to-line-beginning
-  [input]
-  (move-cursor-to input (line-beginning-pos input)))
+;; (defn move-cursor-to-line-beginning
+;;   [input]
+;;   (move-cursor-to input (line-beginning-pos input)))
 
 (defn move-cursor-to-end
   [input]
@@ -171,42 +172,42 @@
                    inc))]
     (move-cursor-to input idx)))
 
-(defn textarea-cursor-first-row? [input]
+(defn textarea-cursor-rect-first-row? [cursor]
   (let [elms   (-> (gdom/getElement "mock-text")
                    gdom/getChildren
                    array-seq)
-        cursor (-> input
-                   (get-caret-pos))
         tops   (->> elms
                     (map mock-char-pos)
                     (map :top)
                     (distinct))]
     (= (first tops) (:top cursor))))
 
-(defn textarea-cursor-last-row? [input]
+(defn textarea-cursor-first-row? [input]
+  (textarea-cursor-rect-first-row? (get-caret-pos input)))
+
+
+(defn textarea-cursor-rect-last-row? [cursor]
   (let [elms   (-> (gdom/getElement "mock-text")
                    gdom/getChildren
                    array-seq)
-        cursor (-> input
-                   (get-caret-pos))
         tops   (->> elms
                     (map mock-char-pos)
                     (map :top)
                     (distinct))]
     (= (last tops) (:top cursor))))
 
-(defn- move-cursor-up-down
-  [input direction]
+(defn textarea-cursor-last-row? [input]
+  (textarea-cursor-rect-last-row? (get-caret-pos input)))
+
+(defn- next-cursor-pos-up-down [direction cursor]
   (let [elms  (-> (gdom/getElement "mock-text")
                   gdom/getChildren
                   array-seq)
-        cusor (-> input
-                  (get-caret-pos))
         chars (->> elms
                    (map mock-char-pos)
                    (group-by :top))
         tops  (sort (keys chars))
-        tops-p (partition-by #(== (:top cusor) %) tops)
+        tops-p (partition-by #(== (:top cursor) %) tops)
         line-next
         (if (= :up direction)
           (-> tops-p first last)
@@ -214,20 +215,30 @@
         lefts
         (->> (get chars line-next)
              (partition-by (fn [char-pos]
-                             (<= (:left char-pos) (:left cusor)))))
+                             (<= (:left char-pos) (:left cursor)))))
         left-a (-> lefts first last)
         left-c (-> lefts last first)
         closer
         (if (> 2 (count lefts))
           left-a
-          (closer left-a cusor left-c))]
-    (move-cursor-to input (:pos closer))))
+          (closer left-a cursor left-c))]
+    (:pos closer)))
+
+(defn- move-cursor-up-down
+  [input direction]
+  (move-cursor-to input (next-cursor-pos-up-down direction (get-caret-pos input))))
 
 (defn move-cursor-up [input]
   (move-cursor-up-down input :up))
 
 (defn move-cursor-down [input]
   (move-cursor-up-down input :down))
+
+(defn select-up-down [input direction anchor cursor-rect]
+  (let [next-cursor (next-cursor-pos-up-down direction cursor-rect)]
+    (if (<= anchor next-cursor)
+      (.setSelectionRange input anchor next-cursor "forward")
+      (.setSelectionRange input next-cursor anchor "backward"))))
 
 (comment
   ;; previous implementation of up/down
